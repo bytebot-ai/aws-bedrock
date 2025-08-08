@@ -1,0 +1,109 @@
+name: Build & Release aws-bedrock (Combined)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "main"
+    paths:
+      - "**"
+      - ".github/workflows/ryvn-aws-bedrock-release.yaml"
+  pull_request:
+    branches:
+      - "main"
+    paths:
+      - "**"
+
+env:
+  SERVICE_NAME: aws-bedrock
+
+jobs:
+  build-and-release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Ryvn CLI
+        uses: ryvn-technologies/install-ryvn-cli@v1.0.0
+
+      - name: Generate Release Tag
+        id: generate-tag
+        env:
+          RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
+          RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
+        run: |
+          # Generate new tag using ryvn CLI
+          tag_info=$(ryvn generate-release-tag ${{ env.SERVICE_NAME }} --prefix=aws-bedrock@ -o json --default-bump-minor)
+          
+          # Extract version and tag from JSON output
+          version=$(echo "$tag_info" | jq -r '.version')
+          new_tag=$(echo "$tag_info" | jq -r '.tag')
+          channel=$(echo "$tag_info" | jq -r '.channel')
+          isPreview=$(echo "$tag_info" | jq -r '.isPreview')
+
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+          echo "channel=$channel" >> $GITHUB_OUTPUT
+          echo "isPreview=$isPreview" >> $GITHUB_OUTPUT
+
+
+
+      - name: Create Ryvn Release
+        if: |
+          !contains(github.event.head_commit.message, '[skip-release]') &&
+          !contains(github.event.pull_request.title, '[skip-release]') &&
+          (steps.generate-tag.outputs.isPreview == 'true' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        env:
+          RYVN_CLIENT_ID: ${{ secrets.RYVN_CLIENT_ID }}
+          RYVN_CLIENT_SECRET: ${{ secrets.RYVN_CLIENT_SECRET }}
+        run: |
+          version="${{ steps.generate-tag.outputs.new_tag }}"
+          version=${version#aws-bedrock@}
+          version=${version#@}
+          channel="${{ steps.generate-tag.outputs.channel }}"
+          is_preview="${{ steps.generate-tag.outputs.isPreview }}"
+          
+          # Validate that preview releases have a channel
+          if [ "$is_preview" = "true" ] && [ -z "$channel" ]; then
+            echo "Error: Preview releases must specify a channel"
+            exit 1
+          fi
+          
+          if [ -n "$channel" ]; then
+            ryvn create release ${{ env.SERVICE_NAME }} $version --channel "$channel"
+          else
+            ryvn create release ${{ env.SERVICE_NAME }} $version
+          fi
+
+      - name: Create GitHub Tag
+        if: |
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          !contains(github.event.head_commit.message, '[skip-release]') &&
+          !contains(github.event.pull_request.title, '[skip-release]')
+        run: |
+          new_tag="${{ steps.generate-tag.outputs.new_tag }}"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git tag $new_tag
+          git push origin $new_tag
+
+      - name: Create GitHub Release
+        if: |
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+          !contains(github.event.head_commit.message, '[skip-release]') &&
+          !contains(github.event.pull_request.title, '[skip-release]')
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.generate-tag.outputs.new_tag }}
+          name: ${{ steps.generate-tag.outputs.new_tag }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
